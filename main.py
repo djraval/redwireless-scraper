@@ -41,7 +41,7 @@ async def process_batch(session, terms):
     
     return companies, errors
 
-async def collect_all_companies(force_refresh: bool = False) -> list:
+async def collect_all_companies() -> list:
     """
     Step 1: Collect all companies from the API using various search patterns
     Returns list of companies
@@ -79,7 +79,7 @@ async def collect_all_companies(force_refresh: bool = False) -> list:
     
     return final_companies
 
-async def enrich_company_data(companies: list, force_refresh: bool = False) -> list:
+async def enrich_company_data(companies: list) -> list:
     """
     Step 2: Enrich company data with group information
     Returns enriched company data
@@ -198,171 +198,235 @@ async def fetch_phone_details(session, slug: str, group_id: str):
     except Exception as e:
         return None, f"Error fetching phone details for {slug}: {str(e)}"
 
-async def fetch_phones_list(session, company_id: str, group_id: str):
-    """Return tuple of (phones_list, error)"""
-    url = "https://api.redwireless.ca/rpp/phones/list"
-    params = {
-        "companyId": company_id,
-        "companyGroupsIds": group_id,
-        "province": "ON",
-        "customerLine": "Primary",
-        "isSalesRep": "false"
-    }
-    
-    try:
-        async with session.get(url, params=params) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data.get('phones', []), None
-            return None, f"HTTP {response.status} for company {company_id}, group {group_id}"
-    except Exception as e:
-        return None, f"Error fetching phones for company {company_id}, group {group_id}: {str(e)}"
-
 def update_company_phones(company, phone_mapping):
     """Update company with phones from the mapping"""
     for group in company.get('groups', []):
         group['phones'] = phone_mapping.get((company['id'], group['id']), [])
     return company
 
-async def collect_phones_data(enriched_companies: list, force_refresh: bool = False) -> list:
+async def collect_master_phone_catalog(session) -> dict:
     """
-    Step 3: Collect phones data for unique groups
+    Collect and build a master catalog of all available phones
+    Returns a dictionary of phones keyed by slug
+    """
+    print("\nBuilding master phone catalog...")
+    
+    # Get base phone list using fetch_all_phones instead
+    phones_list, error = await fetch_all_phones(session)
+    if error:
+        print(f"Error fetching master phone list: {error}")
+        return {}
+    
+    # Build master catalog with base details
+    master_catalog = {}
+    for phone in phones_list:
+        master_catalog[phone['slug']] = {
+            'base_details': phone,
+            'models': {},  # Will store model details keyed by storage size
+            'group_specific_data': {}  # Will store pricing by group ID
+        }
+    
+    print(f"Added {len(master_catalog)} phones to master catalog")
+    return master_catalog
+
+async def collect_group_specific_pricing(session, master_catalog: dict, group_id: str):
+    """
+    Collect group-specific pricing for phones in the master catalog
+    """
+    collection_errors = []
+    
+    # Fetch details for each phone for this group
+    tasks = [
+        fetch_phone_details(session, slug, group_id)
+        for slug in master_catalog.keys()
+    ]
+    
+    results = await asyncio.gather(*tasks)
+    
+    # Process results
+    for slug, (details, error) in zip(master_catalog.keys(), results):
+        if error:
+            collection_errors.append(error)
+        elif details:
+            master_catalog[slug]['group_specific_data'][group_id] = details
+            
+            # Update master catalog with any new model information
+            if 'models' in details:
+                for model in details['models']:
+                    storage = model.get('storage')
+                    if storage and storage not in master_catalog[slug]['models']:
+                        master_catalog[slug]['models'][storage] = model
+    
+    return collection_errors
+
+async def collect_phones_data(enriched_companies: list) -> list:
+    """
+    Step 3: Collect phones data for unique groups using master catalog
+    Returns a list of group data with their phones
     """
     print("\nStarting phones collection...")
     
-    # Get unique groups with their associated companies
+    # Get unique groups and create mapping
     unique_groups = {}
+    group_company_mapping = {}  # New mapping dictionary
     for company in enriched_companies:
         for group in company.get('groups', []):
-            if group['id'] not in unique_groups:
-                unique_groups[group['id']] = {
-                    'id': group['id'],
+            group_id = group['id']
+            if group_id not in unique_groups:
+                unique_groups[group_id] = {
+                    'group_id': group_id,  # Changed from 'id' to 'group_id'
                     'company_group': group['name'],
-                    'companies': [],
                     'phones': []
                 }
-            unique_groups[group['id']]['companies'].append(company['name'])
+                group_company_mapping[group_id] = {
+                    'group_name': group['name'],
+                    'companies': set([company['name']])
+                }
+            else:
+                group_company_mapping[group_id]['companies'].add(company['name'])
     
     print(f"Found {len(unique_groups)} unique groups")
     
     connector = aiohttp.TCPConnector(limit=0)
     async with aiohttp.ClientSession(connector=connector) as session:
-        # Step 1: Get master list of phones
-        print("Fetching master list of phones...")
-        phones_list, error = await fetch_phones_list(session, "", "")
-        if error:
-            print(f"Error fetching master phone list: {error}")
+        # Build master catalog
+        master_catalog = await collect_master_phone_catalog(session)
+        if not master_catalog:
+            print("Error: Failed to build master phone catalog")
             return []
-            
-        print(f"Found {len(phones_list)} available phones")
         
-        # Step 2: Get phone details for each group
-        print("\nFetching phone details for each group...")
-        collection_errors = []
+        # Collect group-specific pricing
+        print("\nCollecting group-specific pricing...")
+        all_errors = []
         
-        # Process groups in batches
         batch_size = 10
         group_batches = [list(unique_groups.keys())[i:i + batch_size] 
                         for i in range(0, len(unique_groups), batch_size)]
         
         for batch_num, group_batch in enumerate(group_batches, 1):
-            tasks = []
             for group_id in group_batch:
-                group_tasks = [
-                    fetch_phone_details(session, phone['slug'], group_id)
-                    for phone in phones_list
-                ]
-                tasks.extend(group_tasks)
-            
-            results = await asyncio.gather(*tasks)
-            
-            # Process results
-            result_idx = 0
-            for group_id in group_batch:
-                for _ in phones_list:
-                    details, error = results[result_idx]
-                    if error:
-                        collection_errors.append(error)
-                    elif details:
-                        unique_groups[group_id]['phones'].append(details)
-                    result_idx += 1
+                errors = await collect_group_specific_pricing(
+                    session, 
+                    master_catalog, 
+                    group_id
+                )
+                all_errors.extend(errors)
             
             print(f"Processed {min((batch_num * batch_size), len(unique_groups))}/{len(unique_groups)} groups")
-    
-    # Sort and deduplicate companies list for each group
-    for group in unique_groups.values():
-        group['companies'] = sorted(set(group['companies']))
-
-    # Save groups data
-    print("\nSaving groups data...")
-    groups_data = list(unique_groups.values())
-    
-    total_phones = sum(len(group['phones']) for group in unique_groups.values())
-    print(f"\nPhone collection complete!")
-    print(f"Groups processed: {len(unique_groups)}")
-    print(f"Total unique phone listings: {total_phones}")
-    print(f"Failed requests: {len(collection_errors)}")
-    
-    return groups_data
+        
+        if all_errors:
+            print("\nErrors during group-specific pricing collection:")
+            for error in all_errors[:5]:  # Show first 5 errors
+                print(f"- {error}")
+            if len(all_errors) > 5:
+                print(f"... and {len(all_errors) - 5} more errors")
+        
+        # Build final output
+        final_groups = []
+        for group_id, group_data in unique_groups.items():
+            group_phones = []
+            for slug, phone_data in master_catalog.items():
+                if group_id in phone_data['group_specific_data']:
+                    group_phones.append(phone_data['group_specific_data'][group_id])
+            
+            final_groups.append({
+                'group_id': group_data['group_id'],
+                'company_group': group_data['company_group'],
+                'phones': group_phones
+            })
+        
+        print(f"\nSuccessfully processed {len(final_groups)} groups")
+        print(f"Total phones collected: {sum(len(group['phones']) for group in final_groups)}")
+        
+        return final_groups, group_company_mapping
 
 async def main():
     """Main orchestration function"""
-    force_refresh = False
+    try:
+        # Step 1: Collect companies
+        companies = await collect_all_companies()
+        if not companies:
+            print("Error: No companies collected")
+            return
+        
+        # Step 2: Enrich with company group IDs
+        enriched_companies = await enrich_company_data(companies)
+        if not enriched_companies:
+            print("Error: No enriched company data")
+            return
+        
+        # Step 3: Collect phones data
+        groups_data, group_company_mapping = await collect_phones_data(enriched_companies)
+        if not groups_data:
+            print("Error: No groups data collected")
+            return
+        
+        # Combine the data structures
+        final_output = []
+        for group in groups_data:
+            group_id = group['group_id']
+            mapping_data = group_company_mapping[group_id]
+            
+            # Create combined structure
+            combined_group = {
+                'group_id': group['group_id'],
+                'company_group': group['company_group'],
+                'companies': sorted(list(mapping_data['companies'])),  # Convert set to sorted list
+                'phones': group['phones']
+            }
+            final_output.append(combined_group)
+
+        # Save single combined output
+        output_file = Path('data/final_data.json')
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(final_output, f, indent=2, ensure_ascii=False)
+        print(f"Saved combined data to {output_file}")
+        
+        # Statistics
+        total_companies = sum(len(group['companies']) for group in final_output)
+        total_phones = sum(len(group['phones']) for group in final_output)
+        unique_phones = len(set(
+            phone['slug']
+            for group in final_output
+            for phone in group['phones']
+        ))
+        
+        print(f"\nFinal Statistics:")
+        print(f"Total unique groups: {len(final_output)}")
+        print(f"Total companies: {total_companies}")
+        print(f"Total phone listings: {total_phones}")
+        print(f"Unique phone models: {unique_phones}")
+        
+        # Updated sample output
+        print("\nSample group data:")
+        if final_output:
+            group = final_output[0]
+            print(f"\nGroup ID: {group['group_id']}")
+            print(f"Group Name: {group['company_group']}")
+            
+            print(f"Companies: {len(group['companies'])} (showing first 3)")
+            for company in group['companies'][:3]:
+                print(f"- {company}")
+            
+            print(f"\nPhones: {len(group['phones'])} (showing first 3)")
+            for phone in group['phones'][:3]:
+                print(f"\n- {phone['brand']} {phone['name']} (Slug: {phone['slug']})")
+                if 'models' in phone:
+                    for model in phone['models']:
+                        print(f"  Model: {model.get('storage', 'N/A')}GB")
+                        if 'plans' in model:
+                            print("  Plans:")
+                            for plan in model['plans'][:2]:  # Show first 2 plans
+                                print(f"    - {plan['title']} (${plan['price']}/mo)")
+                                if plan.get('addons'):
+                                    print("      Addons:")
+                                    for addon in plan['addons'][:2]:  # Show first 2 addons
+                                        price_text = "FREE" if addon['isFree'] else f"${addon['price']}"
+                                        print(f"        - {addon['name']} ({price_text})")
     
-    # Step 1: Collect companies
-    companies = await collect_all_companies(force_refresh=force_refresh)
-    
-    # Step 2: Enrich with company group IDs
-    enriched_companies = await enrich_company_data(companies, force_refresh=force_refresh)
-    
-    # Step 3: Collect phones data
-    groups_data = await collect_phones_data(enriched_companies, force_refresh=force_refresh)
-    
-    # Save final output
-    output_file = Path('data/final_data.json')
-    output_file.parent.mkdir(exist_ok=True)
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(groups_data, f, indent=2, ensure_ascii=False)
-    print(f"\nSaved final data to {output_file}")
-    
-    # Statistics
-    total_companies = sum(len(group['companies']) for group in groups_data)
-    total_phones = sum(len(group['phones']) for group in groups_data)
-    unique_phones = len(set(
-        phone['slug']
-        for group in groups_data
-        for phone in group['phones']
-    ))
-    
-    print(f"\nFinal Statistics:")
-    print(f"Total unique groups: {len(groups_data)}")
-    print(f"Total companies: {total_companies}")
-    print(f"Total phone listings: {total_phones}")
-    print(f"Unique phone models: {unique_phones}")
-    
-    # Sample output
-    print("\nSample group data:")
-    if groups_data:
-        group = groups_data[0]
-        print(f"\nGroup: {group['company_group']}")
-        print(f"Companies: {len(group['companies'])} (showing first 3)")
-        for company in group['companies'][:3]:
-            print(f"- {company}")
-        print(f"\nPhones: {len(group['phones'])} (showing first 3)")
-        for phone in group['phones'][:3]:
-            print(f"\n- {phone['brand']} {phone['name']} (Slug: {phone['slug']})")
-            if 'models' in phone:
-                for model in phone['models']:
-                    print(f"  Model: {model.get('storage', 'N/A')}GB")
-                    if 'plans' in model:
-                        print("  Plans:")
-                        for plan in model['plans'][:2]:  # Show first 2 plans
-                            print(f"    - {plan['title']} (${plan['price']}/mo)")
-                            if plan.get('addons'):
-                                print("      Addons:")
-                                for addon in plan['addons'][:2]:  # Show first 2 addons
-                                    price_text = "FREE" if addon['isFree'] else f"${addon['price']}"
-                                    print(f"        - {addon['name']} ({price_text})")
+    except Exception as e:
+        print(f"Error in main: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())
