@@ -4,6 +4,7 @@ import json
 from string import ascii_lowercase, digits
 from itertools import product
 from pathlib import Path
+from datetime import datetime
 
 async def fetch_companies(session, search_term):
     """Return tuple of (result, error)"""
@@ -361,8 +362,14 @@ async def main():
             print("Error: No groups data collected")
             return
         
-        # Combine the data structures
-        final_output = []
+        # Add timestamp before creating final_output
+        timestamp = datetime.utcnow().isoformat()
+
+        final_output = {
+            "created_at": timestamp,
+            "groups": []
+        }
+
         for group in groups_data:
             group_id = group['group_id']
             mapping_data = group_company_mapping[group_id]
@@ -371,10 +378,10 @@ async def main():
             combined_group = {
                 'group_id': group['group_id'],
                 'company_group': group['company_group'],
-                'companies': sorted(list(mapping_data['companies'])),  # Convert set to sorted list
+                'companies': sorted(list(mapping_data['companies'])),
                 'phones': group['phones']
             }
-            final_output.append(combined_group)
+            final_output["groups"].append(combined_group)
 
         # Save single combined output
         output_file = Path('data/final_data.json')
@@ -383,24 +390,24 @@ async def main():
         print(f"Saved combined data to {output_file}")
         
         # Statistics
-        total_companies = sum(len(group['companies']) for group in final_output)
-        total_phones = sum(len(group['phones']) for group in final_output)
+        total_companies = sum(len(group['companies']) for group in final_output['groups'])
+        total_phones = sum(len(group['phones']) for group in final_output['groups'])
         unique_phones = len(set(
             phone['slug']
-            for group in final_output
+            for group in final_output['groups']
             for phone in group['phones']
         ))
         
         print(f"\nFinal Statistics:")
-        print(f"Total unique groups: {len(final_output)}")
+        print(f"Total unique groups: {len(final_output['groups'])}")
         print(f"Total companies: {total_companies}")
         print(f"Total phone listings: {total_phones}")
         print(f"Unique phone models: {unique_phones}")
         
         # Updated sample output
         print("\nSample group data:")
-        if final_output:
-            group = final_output[0]
+        if final_output['groups']:
+            group = final_output['groups'][0]
             print(f"\nGroup ID: {group['group_id']}")
             print(f"Group Name: {group['company_group']}")
             
