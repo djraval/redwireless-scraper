@@ -56,6 +56,9 @@ def compare_plan_prices(results: List[Dict], sort_by: str = None, plan_id: str =
             financing_price = plan.get('financing', {}).get('priceAfterDiscount')
             monthly_price = plan.get('price')
             
+            # Extract addons from the plan
+            addons = plan.get('addons', [])
+            
             plan_comparison[current_plan_id].append({
                 'group_id': group_id,
                 'group_name': group_name,
@@ -64,7 +67,8 @@ def compare_plan_prices(results: List[Dict], sort_by: str = None, plan_id: str =
                 'upfront_price': upfront_price,
                 'buyout_price': buyout_price,
                 'financing_price': financing_price,
-                'monthly_price': monthly_price
+                'monthly_price': monthly_price,
+                'addons': addons  # Add the addons to the comparison data
             })
     
     # Sort the groups within each plan if requested
@@ -98,23 +102,31 @@ def print_price_comparison(plan_comparison: Dict, phone_name: str, upfront_displ
     print(f"\nPrice Comparison for {phone_name}:")
     print("="*TOTAL_WIDTH)
     
+    # Track if this is the first plan
+    first_plan = True
+    
     for plan_id, groups in plan_comparison.items():
+        # Add extra spacing between plans (except for the first one)
+        if not first_plan:
+            print("\n" + "="*TOTAL_WIDTH + "\n")
+        first_plan = False
+        
         plan_title = groups[0]['plan_title']
         plan_data = groups[0]['plan_data']
         monthly_price = groups[0]['monthly_price']
         
         # Print header with bundled cost note
-        header = f"\nPlan: {plan_title} ({plan_data}GB) - ${monthly_price}/mo (ID: {plan_id})"
+        header = f"Plan: {plan_title} ({plan_data}GB) - ${monthly_price}/mo (ID: {plan_id})"
         print(header)
-        print(f"Note: All prices below include the ${monthly_price}/mo plan cost along with the device cost")
+        print(f"Note: All prices below include the ${monthly_price}/mo plan cost")
         print("-"*TOTAL_WIDTH)
         
         # Column headers
         print(f"{'Group Name':<{GROUP_COL_WIDTH}} {upfront_display_name:<{PRICE_COL_WIDTH}} {'Financing':<{PRICE_COL_WIDTH}}")
         print("-"*TOTAL_WIDTH)
         
-        # Print all groups for this plan
-        for i, group in enumerate(groups):
+        # Print group prices
+        for group in groups:
             group_name = group['group_name']
             upfront_price = group['upfront_price']
             buyout_price = group['buyout_price']
@@ -132,6 +144,21 @@ def print_price_comparison(plan_comparison: Dict, phone_name: str, upfront_displ
             
         # Add separator line after the last group in each plan
         print("-"*TOTAL_WIDTH)
+        
+        # Print available addons for this plan
+        if 'addons' in groups[0]:
+            print("\nAvailable Add-ons:")
+            print("-" * 50)
+            for addon in groups[0]['addons']:
+                name = addon['name'].rstrip(' -')  # Remove trailing dash if present
+                price = addon['price']
+                is_free = addon.get('isFree', False)
+                
+                if is_free:
+                    print(f"🎁 {name} - FREE!")
+                else:
+                    print(f"• {name} - ${price}/mo")
+            print("-" * 50)
 
 def find_phone_by_slug_and_storage(data: List[Dict], phone_slug: str, storage: int) -> List[Dict]:
     """
