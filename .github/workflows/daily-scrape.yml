@@ -38,31 +38,26 @@ jobs:
         echo "First 10 lines of final_data.json:"
         head -n 10 data/final_data.json
       
+    - name: Get current date
+      id: date
+      run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+      
     - name: Create Release
       id: create_release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: latest-data
-        name: Latest Phone Plan Data
+        tag_name: data-${{ steps.date.outputs.date }}
+        name: Phone Plan Data - ${{ steps.date.outputs.date }}
         body: |
-          Phone plan data updated at ${{ github.event.repository.updated_at }}
+          Phone plan data collected on ${{ steps.date.outputs.date }}
         files: data/final_data.json
         draft: false
         prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        
-    - name: Delete old release
-      uses: dev-drprasad/delete-older-releases@v0.2.1
-      with:
-        keep_latest: 1
-        delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Upload artifact
       uses: actions/upload-artifact@v3
       with:
-        name: phone-plan-data
+        name: phone-plan-data-${{ steps.date.outputs.date }}
         path: data/final_data.json
-        retention-days: 5 
